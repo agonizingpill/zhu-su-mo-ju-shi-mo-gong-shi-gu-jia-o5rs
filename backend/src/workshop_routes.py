@@ -5,6 +5,7 @@ from .auth import current,writers,admin
 from .services import serialize,record
 from .workshop_models import MaintenanceWindow,ResinLot,TrialMaterial,TrialDelivery
 from .workshop_schemas import WindowInput,Inspection,ResinInput,ResinState,MaterialIssue,MaterialReturn,DeliveryInput,ReceiptInput,CustomerDecision,CloseDelivery
+from .maintenance_schemas import ApproveInput
 from . import workshop_service as svc
 router=APIRouter()
 @router.get('/maintenance-windows')
@@ -13,8 +14,8 @@ def windows(s=Depends(db_session),u=Depends(current)):return [svc.view(s,x)for x
 def create_window(p:WindowInput,s=Depends(db_session),u=Depends(writers)):
     x=svc.create_window(s,p,u);s.commit();return x
 @router.post('/maintenance-windows/{id}/approve')
-def approve(id:int,s=Depends(db_session),u=Depends(admin)):
-    x=svc.approve_window(s,id,u);s.commit();return x
+def approve(id:int,p:ApproveInput,s=Depends(db_session),u=Depends(admin)):
+    x=svc.approve_window(s,id,p,u);s.commit();return x
 @router.post('/maintenance-windows/{id}/complete')
 def complete(id:int,p:Inspection,s=Depends(db_session),u=Depends(writers)):
     x=svc.finish_window(s,id,p,u);s.commit();return x

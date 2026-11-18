@@ -14,7 +14,8 @@
 - 试模实绩采集：仅已承诺估单开工，一单一份；开工保存预测机时、报价、费率和模具快照。完工时间推导实际机时，良品不得超过总射次；超时完工由负责人填写原因确认。
 - 工时偏差结算：已完工实绩计算实际成本、工时偏差与毛利；偏差绝对值超过20%或毛利为负时，签结前必须补足说明。负责人签结同步冻结实绩及结算草稿，拒绝重复签结。
 
-- 模具保养停机：计划→主管批准→保养完检；批准窗口同模具不得重叠。新开工核对停机时间、同模已有running实绩，批准停机也检查未完工试模，避免冲突。已完检保留停机历史，过去已签结数据不改。
+- 模具保养停机：计划→寿命评估→主管批准→保养完检；批准窗口同模具不得重叠。新开工核对停机时间、同模已有running实绩，批准停机也检查未完工试模，避免冲突。已完检保留停机历史，过去已签结数据不改。
+- 模具保养寿命评估：按相邻两次完检之间累计的试模工时拟合 Weibull 生存模型，未完检的当前间期按右删失处理；给定继续试模工时，输出在当前累计负荷之上到达保养点的条件概率。完检间期少于4个或有效生存样本少于5个时拦截，不出概率。每次评估固定截止时点并冻结当时可见的完工实绩与完检记录，迟补实绩不混入旧结论。主管批准必须绑定一次可批准的评估；批准时负荷或完检已变则拒绝并转待重评。批准与开工都先锁模具行，并发时不会把新开工放进停机窗口。计算中断后按原截止时点续跑，重试不新增评估；页面从待评估到可批准或待重评，展示间期依据与阻断原因。
 - 试模材料领耗：主管树脂批次入库，树脂状态available/quarantine；运行实绩按批次一次领料，锁库存，冻结单价；完工且未建结算可一次退余料，最多退领量。净耗成本=Σ((领kg−退kg)×单价快照)。所有新结算按台账取成本，拒绝任意覆盖；结算建立后领退料冻结。已signed历史数值保持，不补写旧凭据。
 - 客户交付验收：只从signed结算交样，样件数≤实绩good_shots；发样→客户签收→接受或整改→主管关闭。整改必须绑定原完工之后新一次同模具signed实绩，旧实绩或其他模具不能替代；重复签收/关闭拒绝。这里只留本地交接和客户意见，不发送外部消息。
 
@@ -51,7 +52,9 @@ JWT 8 小时过期，密码 PBKDF2-SHA256 盐化存储。演示账号只用于�
 9. 次日08:00，在「试模实绩采集」选择已承诺 `QE-FLOOR-DEMO` 开工，快照为10h、300元/h、报价5000元。此单是演示用已承诺预算，seed首次建立时为M450预留10h；不冒充模型推理结果。
 10. 17:00填写良品94/总射次100，实际9h；结算填材料成本500元，后端计算成本3200元、毛利1800元、工时偏差-10%，负责人签结后两个实体冻结。若超时到次日08:00，则须负责人确认超时原因；异常偏差或负毛利结算另需复核说明。
 
-V3：09:00 MD-115计划11月25日08:00—12:00顶针润滑与滑块检查，主管批准，完检记回位/模面结果；任何新开工不能回填到该窗口。10:00 RS-P20-DEMO树脂单价20元/kg，为运行试模领30kg；完工退5kg，库存净减25kg、净耗500元，结算材料成本只读500元。11:00签结后交10件样件给华远质量部，记录签收与验收；若卡扣装配需整改，必须再建同模新估单、承诺、开工完工、净耗结算signed后才能绑定关闭。
+V3：09:00 MD-115计划11月25日08:00—12:00顶针润滑与滑块检查，先填继续试模工时发起寿命评估，主管按评估批准，完检记回位/模面结果；任何新开工不能回填到该窗口。10:00 RS-P20-DEMO树脂单价20元/kg，为运行试模领30kg；完工退5kg，库存净减25kg、净耗500元，结算材料成本只读500元。11:00签结后交10件样件给华远质量部，记录签收与验收；若卡扣装配需整改，必须再建同模新估单、承诺、开工完工、净耗结算signed后才能绑定关闭。
+
+保养寿命评估演示：seed 为 MD-115 预置 6 个完检间期与 1 个未完检间期（当前累计19h），可对计划窗口填10h发起评估并查看概率与间期；MD-86/MD-42 无完检历史，用来演示样本不足拦截。评估由 worker 消费 `maintenance-assessments` 队列，结果同时写 `MaintenanceAssessment.result` 与 `/artifacts/assessment-<id>.json`。
 
 ## 算法口径与限制
 
@@ -60,6 +63,8 @@ V3：09:00 MD-115计划11月25日08:00—12:00顶针润滑与滑块检查，主�
 Redis worker结果持久化 Estimate.model_result，同时写 backend/worker 共享命名卷 `/artifacts/estimate-<id>.json`。worker 在取走作业后故障中断的自动重投尚未实现；生产化需可靠队列和恢复机制。时段是人工预算，未实现跨日物理日历或设备停机联动。小型项目没有删除、承诺撤销或财务对接。实际工时按开工/完工时间差计算，未填时区按上海解释，保存UTC。单次最长168h，材料成本由领退料台账计算，单价在领料时冻结；没有停机扣时、工资分摊和多次试模合并。完工实绩没有自动写入训练参考表，基准160条不被暗改。
 
 V3范围：保养时间和客户签收可按演示日期录入，无设备时钟联锁；同模具仅允许一份running实绩。每次试模对同树脂批次只领一次，不提供追加领料或多次退料；批次隔离后的退回库存仍保持隔离。客户样件数按good_shots上界，不另展开一射多腔件数。没有仓库外接、实际物流发送、客户门户或电子签章。
+
+保养寿命评估口径：只使用相邻完检之间的间期作为事件；首个完检前的数据不冒充事件。Weibull 二参数以右删失最大似然拟合，形状用确定性黄金分割搜索，无额外依赖；概率为条件生存 `1−S(当前负荷+继续工时)/S(当前负荷)`。样本阈值 4 个事件且总计 5 个间期，未达阈值只给阻断原因。完检时间取记录完检时的服务器时刻，不按计划窗口推算。评估证据按记录身份+业务时间+工时生成指纹，任何新增实绩或完检都会使旧结论显示待重评；批准事务内再次核对指纹。评估仅覆盖停机养护，不涉及备件采购或设备台账。
 
 ## 本地开发与结构
 
@@ -74,13 +79,15 @@ V3范围：保养时间和客户签收可按演示日期录入，无设备时钟
 
 V3 `backend/src/workshop_models.py`定义MaintenanceWindow、ResinLot、TrialMaterial、ReviewMaterialLedger、TrialDelivery；`workshop_schemas.py`校验时间、kg、客户记录，`workshop_service.py`负责停机/领耗/交付规则，`workshop_routes.py`提供`/maintenance-windows`、`/resin-lots`、`/trial-materials`、`/trial-deliveries`。原表列无新增，create_all非破坏性增加5张表；新结算另存材料快照凭据，不改旧signed记录。
 
+保养寿命评估 `backend/src/maintenance_life.py`（纯 Python 间期归集与 Weibull 拟合）、`maintenance_models.py`（MaintenanceCompletion、MaintenanceAssessment 两张新表）、`maintenance_service.py`（冻结快照、指纹、幂等续跑、批准门禁）、`maintenance_jobs.py`（worker 侧重算与扫掠）、`maintenance_routes.py`（`/maintenance-assessments`）。`workshop_service.approve_window` 增加绑定评估与批准时复核；`finish_window` 记录完检时刻。原表无列变更，create_all 非破坏性增加2张表；评估表只增不改历史。`backend/tests/test_maintenance_life.py` 覆盖间期、删失、样本拦截与确定性。
+
 `backend/src/execution_models.py` 定义实绩/结算外键与唯一约束，`execution_schemas.py` 校验输入，`execution_service.py` 管理快照、工时与成本事务，`execution_routes.py` 暴露 `/executions`、`/cost-reviews` 及 finish/sign 操作。
 
 `frontend/src/pages/` 的 moulds/estimates/evidence/schedule/executions/reviews 及 maintenance/materials/deliveries 是九页；`api.js` HTTP；`store.js` 业务状态；`components/common.js` 状态标签/证据条/选择器跨页复用；`utils/format.js` 转义、金额/数字和表单工具。
 
 本地 `pip install -r backend/requirements.txt`，设置 DATABASE_URL/REDIS_URL，在backend目录 `uvicorn src.main:app --reload`，另一终端 `python -m src.worker`。前端建议使用Compose Nginx代理。
 
-枚举位置：角色、估价状态、实绩状态、结算、保养、树脂、领料、交付状态与钢材定义在 `backend/src/constants.py` 和 `frontend/src/constants.js`；`GET /enums` 返回上述九组。钢材输入Literal在schemas.py、模型编码在ml.py。后端权限为真实约束，前端禁用按钮作提示。IntegrityError转成可恢复409。
+枚举位置：角色、估价状态、实绩状态、结算、保养、保养评估、树脂、领料、交付状态与钢材定义在 `backend/src/constants.py` 和 `frontend/src/constants.js`；`GET /enums` 返回上述十组。钢材输入Literal在schemas.py、模型编码在ml.py。后端权限为真实约束，前端禁用按钮作提示。IntegrityError转成可恢复409。
 
 环境变量见 `.env.example`：COMPOSE_PROJECT_NAME、FRONTEND_PORT、BACKEND_PORT、DB_PORT、JWT_SECRET、SEED_DEMO。`COMPOSE_SUBNET=10.221.23.0/24` 是本机默认地址池已满后的专用网段；冲突时改空闲网段。数据库、Redis、计算产物为命名卷。
 

@@ -1,19 +1,19 @@
 import os,logging
 from contextlib import asynccontextmanager
-import redis
 from fastapi import FastAPI,Depends,HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import select,func
 from sqlalchemy.exc import IntegrityError
 from .db import Base,engine,db_session
+from .queue import r
 from .models import User,Mould,Estimate,MachineSlot,TrialHistory,Audit
 from .auth import current,writers,admin,verify,token
 from .schemas import Login,MouldInput,EstimateInput,QuoteInput,SlotChoice,SlotInput
 from .services import item,serialize,record,require_edit,request_capacity,commit_capacity
 from .middlewares import RequestTrace,BurstGuard
-from .constants import ROLES,ESTIMATE_STATES,STEELS,EXECUTION_STATES,REVIEW_STATES,MAINTENANCE_STATES,RESIN_STATES,MATERIAL_STATES,DELIVERY_STATES
-r=redis.Redis.from_url(os.environ['REDIS_URL'],decode_responses=True)
+from .constants import ROLES,ESTIMATE_STATES,STEELS,EXECUTION_STATES,REVIEW_STATES,MAINTENANCE_STATES,RESIN_STATES,MATERIAL_STATES,DELIVERY_STATES,MAINTENANCE_ASSESSMENT_STATES
+from .queue import ESTIMATE_QUEUE
 @asynccontextmanager
 async def lifespan(app):
     Base.metadata.create_all(engine)
@@ -28,6 +28,8 @@ from .execution_routes import router as execution_router
 app.include_router(execution_router)
 from .workshop_routes import router as workshop_router
 app.include_router(workshop_router)
+from .maintenance_routes import router as maintenance_router
+app.include_router(maintenance_router)
 app.add_middleware(RequestTrace);app.add_middleware(BurstGuard)
 app.add_middleware(CORSMiddleware,allow_origins=['http://localhost:18222'],allow_methods=['*'],allow_headers=['*'])
 @app.exception_handler(IntegrityError)
@@ -43,7 +45,7 @@ def login(p:Login,s=Depends(db_session)):
 @app.get('/me')
 def me(u=Depends(current)):return {'email':u.email,'role':u.role}
 @app.get('/enums')
-def enums(u=Depends(current)):return {'roles':ROLES,'estimate_states':ESTIMATE_STATES,'steels':STEELS,'execution_states':EXECUTION_STATES,'review_states':REVIEW_STATES,'maintenance_states':MAINTENANCE_STATES,'resin_states':RESIN_STATES,'material_states':MATERIAL_STATES,'delivery_states':DELIVERY_STATES}
+def enums(u=Depends(current)):return {'roles':ROLES,'estimate_states':ESTIMATE_STATES,'steels':STEELS,'execution_states':EXECUTION_STATES,'review_states':REVIEW_STATES,'maintenance_states':MAINTENANCE_STATES,'resin_states':RESIN_STATES,'material_states':MATERIAL_STATES,'delivery_states':DELIVERY_STATES,'maintenance_assessment_states':MAINTENANCE_ASSESSMENT_STATES}
 @app.get('/moulds')
 def moulds(s=Depends(db_session),u=Depends(current)):return [serialize(x) for x in s.scalars(select(Mould).order_by(Mould.id))]
 @app.post('/moulds')
@@ -73,7 +75,7 @@ def calculate(eid:int,s=Depends(db_session),u=Depends(writers)):
     e=item(s,Estimate,eid);require_edit(e)
     if e.status=='requested':raise HTTPException(409,'已申请机时，请先修改报价撤回申请')
     e.status='calculating';e.predicted_hours=None;e.model_result=None;record(s,u,'估算入队 '+e.code);s.commit()
-    try:r.rpush('mould-estimates',e.id)
+    try:r.rpush(ESTIMATE_QUEUE,e.id)
     except Exception:
         e.status='failed';s.commit();raise HTTPException(503,'计算队列暂不可用，请重试')
     return serialize(e)

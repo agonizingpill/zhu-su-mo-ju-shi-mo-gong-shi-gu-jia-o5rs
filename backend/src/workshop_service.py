@@ -5,7 +5,9 @@ from sqlalchemy import select
 from .models import Mould,Estimate
 from .execution_models import TrialExecution,CostReview
 from .workshop_models import MaintenanceWindow,ResinLot,TrialMaterial,ReviewMaterialLedger,TrialDelivery
+from .maintenance_models import MaintenanceCompletion,MaintenanceAssessment
 from .services import item,serialize,record
+from .maintenance_service import require_ready
 
 def stamp(value):
     from .execution_service import stamp as convert
@@ -13,6 +15,9 @@ def stamp(value):
 def view(s,x):
     d=serialize(x)
     if isinstance(x,MaintenanceWindow):d['mould_code']=item(s,Mould,x.mould_id).code
+    if isinstance(x,MaintenanceWindow):
+        c=s.scalar(select(MaintenanceCompletion).where(MaintenanceCompletion.window_id==x.id))
+        d['completed_at']=c.completed_at if c else None
     if isinstance(x,TrialMaterial):
         e=item(s,TrialExecution,x.execution_id);d.update(estimate_code=e.snapshot['estimate_code'],lot_code=item(s,ResinLot,x.lot_id).code,net_kg=float(x.issued_kg-x.returned_kg),net_cost=float(((x.issued_kg-x.returned_kg)*x.unit_price_snapshot).quantize(Decimal('.01'))))
     if isinstance(x,TrialDelivery):d['estimate_code']=x.snapshot['estimate_code']
@@ -25,19 +30,33 @@ def create_window(s,p,u):
     item(s,Mould,p.mould_id);start,end=stamp(p.starts_at),stamp(p.ends_at)
     if end<=start:raise HTTPException(409,'保养结束必须晚于开始')
     x=MaintenanceWindow(mould_id=p.mould_id,starts_at=start.isoformat(),ends_at=end.isoformat(),reason=p.reason,state='planned');s.add(x);s.flush();record(s,u,'登记保养窗口 '+str(x.id));return view(s,x)
-def approve_window(s,id,u):
-    # Lock the mould first, same order as beginning a trial, so approvals cannot race starts.
-    candidate=item(s,MaintenanceWindow,id);locked(s,Mould,candidate.mould_id);x=locked(s,MaintenanceWindow,id)
+def approve_window(s,id,p,u):
+    # Lock the mould first, same order as beginning a trial, so approvals cannot
+    # race starts.  The candidate assessment is locked next, before plan state
+    # checks, so a duplicate approval cannot race the first one to 200.
+    candidate=item(s,MaintenanceWindow,id);locked(s,Mould,candidate.mould_id)
+    assessment=s.scalar(select(MaintenanceAssessment).where(MaintenanceAssessment.id==p.assessment_id).with_for_update())
+    x=locked(s,MaintenanceWindow,id)
     if x.state!='planned':raise HTTPException(409,'只可批准计划保养，不得重复批准')
     others=s.scalars(select(MaintenanceWindow).where(MaintenanceWindow.mould_id==x.mould_id,MaintenanceWindow.state.in_(['approved','completed']),MaintenanceWindow.id!=x.id))
     if any(datetime.fromisoformat(y.starts_at)<datetime.fromisoformat(x.ends_at) and datetime.fromisoformat(y.ends_at)>datetime.fromisoformat(x.starts_at) for y in others):raise HTTPException(409,'该模具已有重叠批准停机窗口')
+    # A candidate trial started before approval must be visible here too.  Both
+    # approve and begin lock the mould row first, so a start that wins the lock
+    # finishes first and blocks the approval; a start after approval sees the
+    # approved window and is rejected.  The pair cannot slip through the gap.
     for execution in s.scalars(select(TrialExecution).join(Estimate,TrialExecution.estimate_id==Estimate.id).where(Estimate.mould_id==x.mould_id,TrialExecution.status=='running')):
         if datetime.fromisoformat(execution.started_at)<datetime.fromisoformat(x.ends_at):raise HTTPException(409,'模具有未完工实绩，不能批准与其可能重叠的停机')
-    x.state='approved';x.approved_by=u.email;record(s,u,'批准停机保养 '+str(x.id));return view(s,x)
+    require_ready(s,x,p,assessment)
+    x.state='approved';x.approved_by=u.email;assessment.status='approved';assessment.approved_by=u.email;assessment.approved_at=datetime.now(timezone.utc).isoformat();record(s,u,'批准停机保养 '+str(x.id));return view(s,x)
 def finish_window(s,id,p,u):
     x=locked(s,MaintenanceWindow,id)
     if x.state!='approved':raise HTTPException(409,'仅已批准保养可记录完检，不可重复完成')
-    x.inspection_note=p.inspection_note;x.state='completed';record(s,u,'保养完检 '+str(x.id));return view(s,x)
+    x.inspection_note=p.inspection_note;x.state='completed'
+    # Record the completion time that later survival assessments will treat as
+    # the closing boundary of this mould's maintenance cycle.
+    stamp_value=datetime.now(timezone.utc).isoformat()
+    s.add(MaintenanceCompletion(window_id=x.id,mould_id=x.mould_id,completed_at=stamp_value))
+    record(s,u,'保养完检 '+str(x.id));return view(s,x)
 def trial_ready(s,e,started):
     locked(s,Mould,e.mould_id)
     if s.scalar(select(TrialExecution.id).join(Estimate,TrialExecution.estimate_id==Estimate.id).where(Estimate.mould_id==e.mould_id,TrialExecution.status=='running')):raise HTTPException(409,'同一模具有正在运行的试模，须先完工')

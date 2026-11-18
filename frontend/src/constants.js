@@ -6,6 +6,7 @@ export const EXECUTION_STATES={running:'试模进行中',completed:'已完工待
 export const REVIEW_STATES={draft:'待主管复核',signed:'主管已签结'};
 
 export const MAINTENANCE_STATES={planned:'待批准保养',approved:'停机已批准',completed:'保养已完检'};
+export const ASSESSMENT_STATES={queued:'评估计算中',ready:'可批准',blocked:'样本不足已拦截',failed:'计算失败可重试',stale:'待重评',approved:'已随批准冻结'};
 export const RESIN_STATES={available:'批次可用',quarantine:'批次隔离'};
 export const MATERIAL_STATES={issued:'已领料',returned:'已登记退料'};
 export const DELIVERY_STATES={dispatched:'已发样待签收',received:'客户已签收',accepted:'客户接受',rectification:'需整改重试',closed:'主管已关闭'};
